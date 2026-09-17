@@ -1,0 +1,53 @@
+{
+  "model_training": {
+    "train_period": "2y",
+    "interval": "1d",
+    "cv_splits": 5,
+    "test_size": 0.2
+  },
+  "model_parameters": {
+    "RandomForest": {
+      "n_estimators": 100,
+      "max_depth": 8,
+      "random_state": 42
+    },
+    "GradientBoosting": {
+      "n_estimators": 50,
+      "learning_rate": 0.1,
+      "random_state": 42
+    }
+  },
+  "features": {
+    "technical_indicators": [
+      "RSI",
+      "MACD",
+      "ADX",
+      "Volatility",
+      "Volume_Ratio",
+      "Bollinger_Bands",
+      "SMA",
+      "EMA"
+    ],
+    "lookback_periods": [
+      1,
+      5,
+      10,
+      20,
+      50
+    ]
+  },
+  "prediction": {
+    "forward_days": 5,
+    "threshold": 0.02,
+    "classes": [
+      "SELL",
+      "HOLD",
+      "BUY"
+    ]
+  },
+  "cache": {
+    "enabled": true,
+    "max_age_hours": 24,
+    "directory": ".ml_cache"
+  }
+}

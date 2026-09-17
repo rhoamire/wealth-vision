@@ -1,0 +1,2094 @@
+"""
+Artha Drishti - ML Based Advanced Stock Screener
+Features: All NSE stocks, Custom strategies, Portfolio analysis, News sentiment, Price predictions
+Run with: streamlit run app.py
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import yfinance as yf
+import ta
+from datetime import datetime, timedelta
+import json
+import time
+import warnings
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score
+import requests
+from io import StringIO
+import concurrent.futures
+from functools import lru_cache
+from textblob import TextBlob
+import re
+
+warnings.filterwarnings("ignore")
+
+# NewsAPI Configuration
+NEWS_API_KEY = "fe303478-aba4-479e-8bdb-b2b8feb2db64"  # Replace with your NewsAPI key from newsapi.org
+NEWS_API_URL = "https://newsapi.org/v2/everything"
+
+# ============================================================================
+# NEWS SENTIMENT ANALYZER
+# ============================================================================
+
+class NewsSentimentAnalyzer:
+    """Analyze news sentiment for stocks"""
+    
+    def __init__(self, api_key):
+        self.api_key = api_key
+    
+    def get_news(self, symbol, company_name, days=7):
+        """Fetch news for a stock"""
+        try:
+            # Search query
+            query = f"{company_name} OR {symbol}"
+            from_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+            
+            params = {
+                'q': query,
+                'from': from_date,
+                'sortBy': 'relevancy',
+                'language': 'en',
+                'pageSize': 10,
+                'apiKey': self.api_key
+            }
+            
+            response = requests.get(NEWS_API_URL, params=params, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                articles = data.get('articles', [])
+                return articles
+            else:
+                return []
+        except:
+            return []
+    
+    def analyze_sentiment(self, text):
+        """Analyze sentiment of text"""
+        try:
+            blob = TextBlob(text)
+            polarity = blob.sentiment.polarity
+            
+            if polarity > 0.1:
+                sentiment = "Positive"
+                score = polarity
+            elif polarity < -0.1:
+                sentiment = "Negative"
+                score = polarity
+            else:
+                sentiment = "Neutral"
+                score = polarity
+            
+            return sentiment, score
+        except:
+            return "Neutral", 0
+    
+    def analyze_stock_news(self, symbol, company_name):
+        """Complete news sentiment analysis"""
+        articles = self.get_news(symbol, company_name)
+        
+        if not articles:
+            return {
+                'overall_sentiment': 'Neutral',
+                'sentiment_score': 0,
+                'news_count': 0,
+                'articles': [],
+                'positive_count': 0,
+                'negative_count': 0,
+                'neutral_count': 0
+            }
+        
+        sentiments = []
+        article_data = []
+        
+        for article in articles:
+            title = article.get('title', '')
+            description = article.get('description', '')
+            text = f"{title} {description}"
+            
+            sentiment, score = self.analyze_sentiment(text)
+            sentiments.append(score)
+            
+            article_data.append({
+                'title': title,
+                'description': description,
+                'sentiment': sentiment,
+                'score': score,
+                'url': article.get('url', ''),
+                'publishedAt': article.get('publishedAt', '')
+            })
+        
+        # Calculate overall sentiment
+        avg_sentiment = np.mean(sentiments) if sentiments else 0
+        
+        if avg_sentiment > 0.1:
+            overall = "Positive"
+        elif avg_sentiment < -0.1:
+            overall = "Negative"
+        else:
+            overall = "Neutral"
+        
+        positive_count = sum(1 for s in sentiments if s > 0.1)
+        negative_count = sum(1 for s in sentiments if s < -0.1)
+        neutral_count = len(sentiments) - positive_count - negative_count
+        
+        return {
+            'overall_sentiment': overall,
+            'sentiment_score': avg_sentiment,
+            'news_count': len(articles),
+            'articles': article_data,
+            'positive_count': positive_count,
+            'negative_count': negative_count,
+            'neutral_count': neutral_count
+        }
+
+# ============================================================================
+# PRICE PREDICTOR
+# ============================================================================
+
+class PricePredictor:
+    """Advanced price prediction with target, buy, sell, and stop loss"""
+    
+    def __init__(self):
+        pass
+    
+    def calculate_support_resistance(self, df, window=20):
+        """Calculate support and resistance levels"""
+        highs = df['High'].rolling(window).max()
+        lows = df['Low'].rolling(window).min()
+        
+        resistance = highs.iloc[-1]
+        support = lows.iloc[-1]
+        
+        return support, resistance
+    
+    def calculate_pivot_points(self, df):
+        """Calculate pivot points"""
+        high = df['High'].iloc[-1]
+        low = df['Low'].iloc[-1]
+        close = df['Close'].iloc[-1]
+        
+        pivot = (high + low + close) / 3
+        r1 = 2 * pivot - low
+        r2 = pivot + (high - low)
+        s1 = 2 * pivot - high
+        s2 = pivot - (high - low)
+        
+        return {
+            'pivot': pivot,
+            'r1': r1,
+            'r2': r2,
+            's1': s1,
+            's2': s2
+        }
+    
+    def calculate_atr_stops(self, df, multiplier=2):
+        """Calculate ATR-based stop loss"""
+        atr = ta.volatility.AverageTrueRange(df['High'], df['Low'], df['Close']).average_true_range()
+        current_price = df['Close'].iloc[-1]
+        atr_value = atr.iloc[-1]
+        
+        stop_loss = current_price - (multiplier * atr_value)
+        take_profit = current_price + (multiplier * atr_value * 1.5)
+        
+        return stop_loss, take_profit
+    
+    def predict_target_price(self, df, sentiment_score=0, fundamental_score=50):
+        """Predict target price with confidence"""
+        try:
+            current_price = df['Close'].iloc[-1]
+            
+            # Technical Analysis Component (40% weight)
+            # Trend analysis
+            sma_20 = df['Close'].rolling(20).mean().iloc[-1]
+            sma_50 = df['Close'].rolling(50).mean().iloc[-1]
+            trend_strength = (current_price - sma_50) / sma_50 * 100
+            
+            # RSI
+            rsi = ta.momentum.RSIIndicator(df['Close']).rsi().iloc[-1]
+            rsi_score = (rsi - 50) / 50  # Normalized
+            
+            # MACD
+            macd = ta.trend.MACD(df['Close'])
+            macd_value = macd.macd().iloc[-1]
+            macd_signal = macd.macd_signal().iloc[-1]
+            macd_bullish = 1 if macd_value > macd_signal else -1
+            
+            # Volatility
+            volatility = df['Close'].pct_change().std() * np.sqrt(252)
+            
+            # Support and Resistance
+            support, resistance = self.calculate_support_resistance(df)
+            distance_to_resistance = (resistance - current_price) / current_price * 100
+            
+            # Pivot points
+            pivots = self.calculate_pivot_points(df)
+            
+            # ATR stops
+            atr_stop, atr_target = self.calculate_atr_stops(df)
+            
+            # Technical score
+            technical_score = (
+                (trend_strength / 10) * 0.3 +
+                rsi_score * 0.2 +
+                macd_bullish * 0.3 +
+                (distance_to_resistance / 10) * 0.2
+            ) * 100
+            
+            # Sentiment Component (30% weight)
+            sentiment_component = sentiment_score * 100
+            
+            # Fundamental Component (30% weight)
+            fundamental_component = (fundamental_score - 50) / 50 * 100
+            
+            # Combined Score
+            combined_score = (
+                technical_score * 0.4 +
+                sentiment_component * 0.3 +
+                fundamental_component * 0.3
+            )
+            
+            # Predict price movement
+            expected_return = combined_score / 100 * volatility
+            
+            # Calculate targets
+            target_price = current_price * (1 + expected_return)
+            conservative_target = current_price * (1 + expected_return * 0.5)
+            aggressive_target = current_price * (1 + expected_return * 1.5)
+            
+            # Buy/Sell prices
+            buy_price = min(current_price * 0.98, pivots['s1'])
+            sell_price = max(target_price, pivots['r1'])
+            
+            # Stop loss (use ATR-based or 3% below buy)
+            stop_loss = max(atr_stop, buy_price * 0.97)
+            
+            # Calculate confidence
+            confidence_factors = []
+            
+            # Technical confidence
+            if 40 < rsi < 60:
+                confidence_factors.append(15)
+            elif 30 < rsi < 70:
+                confidence_factors.append(10)
+            else:
+                confidence_factors.append(5)
+            
+            # Trend confidence
+            if trend_strength > 5:
+                confidence_factors.append(20)
+            elif trend_strength > 0:
+                confidence_factors.append(10)
+            else:
+                confidence_factors.append(5)
+            
+            # MACD confidence
+            if macd_bullish > 0:
+                confidence_factors.append(15)
+            else:
+                confidence_factors.append(5)
+            
+            # Sentiment confidence
+            if abs(sentiment_score) > 0.3:
+                confidence_factors.append(20)
+            elif abs(sentiment_score) > 0.1:
+                confidence_factors.append(10)
+            else:
+                confidence_factors.append(5)
+            
+            # Volume confidence
+            volume_ratio = df['Volume'].iloc[-5:].mean() / df['Volume'].mean()
+            if volume_ratio > 1.2:
+                confidence_factors.append(15)
+            elif volume_ratio > 0.8:
+                confidence_factors.append(10)
+            else:
+                confidence_factors.append(5)
+            
+            # Volatility penalty
+            if volatility > 0.5:
+                confidence_factors.append(-10)
+            
+            confidence = min(sum(confidence_factors), 95)
+            confidence = max(confidence, 20)
+            
+            # Time horizon (days)
+            time_horizon = int(30 / (volatility + 0.1))
+            time_horizon = min(max(time_horizon, 7), 90)
+            
+            return {
+                'current_price': current_price,
+                'target_price': target_price,
+                'conservative_target': conservative_target,
+                'aggressive_target': aggressive_target,
+                'buy_price': buy_price,
+                'sell_price': sell_price,
+                'stop_loss': stop_loss,
+                'confidence': confidence,
+                'time_horizon': time_horizon,
+                'expected_return': expected_return * 100,
+                'technical_score': technical_score,
+                'sentiment_score': sentiment_component,
+                'fundamental_score': fundamental_component,
+                'support': support,
+                'resistance': resistance,
+                'pivot_points': pivots,
+                'atr_stop': atr_stop,
+                'atr_target': atr_target,
+                'risk_reward': abs((target_price - buy_price) / (buy_price - stop_loss)) if (buy_price - stop_loss) > 0 else 0
+            }
+            
+        except Exception as e:
+            return None
+
+# ============================================================================
+# DATA LOADER
+# ============================================================================
+
+@st.cache_data(ttl=86400)  # Cache for 24 hours
+def load_nse_stocks():
+    """Load all NSE stock symbols"""
+    try:
+        url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        df = pd.read_csv(StringIO(response.text))
+        symbols = df['SYMBOL'].str.strip().tolist()
+        return sorted(symbols)
+    except Exception as e:
+        st.error(f"Failed to load NSE stocks: {e}")
+        # Fallback to sample stocks
+        return ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", 
+                "HINDUNILVR", "SBIN", "BHARTIARTL", "ITC", "KOTAKBANK",
+                "LT", "AXISBANK", "BAJFINANCE", "ASIANPAINT", "MARUTI"]
+
+@lru_cache(maxsize=500)
+def get_stock_data_cached(symbol, period="2y"):
+    """Cached stock data retrieval"""
+    try:
+        ticker = yf.Ticker(symbol + ".NS")
+        df = ticker.history(period=period)
+        return df if not df.empty and len(df) > 100 else None
+    except:
+        return None
+
+# ============================================================================
+# STRATEGY ENGINE
+# ============================================================================
+
+class StrategyEngine:
+    """Custom screening strategy builder"""
+    
+    AVAILABLE_INDICATORS = {
+        'MACD': {'type': 'trend', 'params': ['fast', 'slow', 'signal']},
+        'RSI': {'type': 'momentum', 'params': ['period', 'overbought', 'oversold']},
+        'ADX': {'type': 'trend', 'params': ['period', 'threshold']},
+        'Bollinger': {'type': 'volatility', 'params': ['period', 'std']},
+        'Volume': {'type': 'volume', 'params': ['period', 'multiplier']},
+        'SMA_Cross': {'type': 'trend', 'params': ['fast', 'slow']},
+        'EMA_Cross': {'type': 'trend', 'params': ['fast', 'slow']},
+        'Stochastic': {'type': 'momentum', 'params': ['k', 'd', 'smooth']},
+        'CCI': {'type': 'momentum', 'params': ['period', 'threshold']},
+        'ATR': {'type': 'volatility', 'params': ['period']},
+    }
+    
+    def __init__(self):
+        self.strategies = self.load_default_strategies()
+    
+    def load_default_strategies(self):
+        """Load default strategies"""
+        return {
+            'Swing Trader': {
+                'description': 'Medium-term momentum with trend confirmation',
+                'rules': [
+                    {'indicator': 'MACD', 'condition': 'bullish_cross', 'weight': 2.0},
+                    {'indicator': 'RSI', 'condition': 'between', 'min': 50, 'max': 70, 'weight': 1.5},
+                    {'indicator': 'ADX', 'condition': 'above', 'threshold': 25, 'weight': 1.5},
+                    {'indicator': 'Volume', 'condition': 'above_avg', 'multiplier': 1.2, 'weight': 1.0},
+                ]
+            },
+            'Momentum Hunter': {
+                'description': 'High momentum stocks breaking out',
+                'rules': [
+                    {'indicator': 'RSI', 'condition': 'above', 'threshold': 60, 'weight': 2.0},
+                    {'indicator': 'MACD', 'condition': 'bullish', 'weight': 1.5},
+                    {'indicator': 'Volume', 'condition': 'above_avg', 'multiplier': 1.5, 'weight': 2.0},
+                    {'indicator': 'SMA_Cross', 'condition': 'golden', 'fast': 20, 'slow': 50, 'weight': 1.5},
+                ]
+            },
+            'Value Bounce': {
+                'description': 'Oversold stocks with reversal potential',
+                'rules': [
+                    {'indicator': 'RSI', 'condition': 'below', 'threshold': 40, 'weight': 2.0},
+                    {'indicator': 'Bollinger', 'condition': 'near_lower', 'weight': 1.5},
+                    {'indicator': 'MACD', 'condition': 'turning_up', 'weight': 1.5},
+                    {'indicator': 'Volume', 'condition': 'above_avg', 'multiplier': 1.0, 'weight': 1.0},
+                ]
+            },
+            'Trend Rider': {
+                'description': 'Strong trending stocks',
+                'rules': [
+                    {'indicator': 'ADX', 'condition': 'above', 'threshold': 30, 'weight': 2.5},
+                    {'indicator': 'EMA_Cross', 'condition': 'bullish', 'fast': 12, 'slow': 26, 'weight': 2.0},
+                    {'indicator': 'RSI', 'condition': 'above', 'threshold': 55, 'weight': 1.5},
+                    {'indicator': 'Volume', 'condition': 'trending_up', 'weight': 1.0},
+                ]
+            }
+        }
+    
+    def evaluate_strategy(self, df, strategy_name):
+        """Evaluate a strategy on stock data"""
+        if strategy_name not in self.strategies:
+            return None
+        
+        strategy = self.strategies[strategy_name]
+        df = compute_indicators(df)
+        
+        if df is None or len(df) < 50:
+            return None
+        
+        total_score = 0
+        total_weight = 0
+        conditions_met = []
+        
+        for rule in strategy['rules']:
+            indicator = rule['indicator']
+            condition = rule['condition']
+            weight = rule.get('weight', 1.0)
+            
+            met = self._evaluate_rule(df, rule)
+            
+            if met:
+                total_score += weight
+                conditions_met.append(f"{indicator}:{condition}")
+            
+            total_weight += weight
+        
+        confidence = (total_score / total_weight * 100) if total_weight > 0 else 0
+        
+        return {
+            'confidence': confidence,
+            'conditions_met': len(conditions_met),
+            'total_conditions': len(strategy['rules']),
+            'details': conditions_met
+        }
+    
+    def _evaluate_rule(self, df, rule):
+        """Evaluate a single rule"""
+        try:
+            indicator = rule['indicator']
+            condition = rule['condition']
+            latest = df.iloc[-1]
+            prev = df.iloc[-2] if len(df) > 1 else latest
+            
+            if indicator == 'MACD':
+                if condition == 'bullish_cross':
+                    return latest['MACD'] > latest['MACD_Signal'] and prev['MACD'] <= prev['MACD_Signal']
+                elif condition == 'bullish':
+                    return latest['MACD'] > 0
+                elif condition == 'turning_up':
+                    return latest['MACD'] > prev['MACD']
+            
+            elif indicator == 'RSI':
+                if condition == 'above':
+                    return latest['RSI'] > rule.get('threshold', 50)
+                elif condition == 'below':
+                    return latest['RSI'] < rule.get('threshold', 50)
+                elif condition == 'between':
+                    return rule.get('min', 0) < latest['RSI'] < rule.get('max', 100)
+            
+            elif indicator == 'ADX':
+                if condition == 'above':
+                    return latest['ADX'] > rule.get('threshold', 25)
+            
+            elif indicator == 'Bollinger':
+                if condition == 'near_lower':
+                    distance = (latest['Close'] - latest['BB_lower']) / (latest['BB_upper'] - latest['BB_lower'])
+                    return distance < 0.2
+            
+            elif indicator == 'Volume':
+                if condition == 'above_avg':
+                    return latest['Volume'] > latest['Vol_MA'] * rule.get('multiplier', 1.0)
+                elif condition == 'trending_up':
+                    vol_5 = df['Volume'].iloc[-5:].mean()
+                    vol_20 = df['Volume'].iloc[-20:].mean()
+                    return vol_5 > vol_20 * 1.1
+            
+            elif indicator == 'SMA_Cross':
+                if condition == 'golden':
+                    fast = rule.get('fast', 20)
+                    slow = rule.get('slow', 50)
+                    sma_fast = df['Close'].rolling(fast).mean()
+                    sma_slow = df['Close'].rolling(slow).mean()
+                    return sma_fast.iloc[-1] > sma_slow.iloc[-1] and sma_fast.iloc[-2] <= sma_slow.iloc[-2]
+            
+            elif indicator == 'EMA_Cross':
+                if condition == 'bullish':
+                    fast = rule.get('fast', 12)
+                    slow = rule.get('slow', 26)
+                    ema_fast = df['Close'].ewm(span=fast).mean()
+                    ema_slow = df['Close'].ewm(span=slow).mean()
+                    return ema_fast.iloc[-1] > ema_slow.iloc[-1]
+            
+            return False
+        except:
+            return False
+
+# ============================================================================
+# ML PREDICTOR (Enhanced)
+# ============================================================================
+
+class EnhancedMLPredictor:
+    """Enhanced ML predictor with ensemble methods"""
+    
+    def __init__(self):
+        self.models = {
+            'rf': RandomForestClassifier(n_estimators=100, max_depth=8, random_state=42, n_jobs=-1),
+            'gb': GradientBoostingClassifier(n_estimators=50, learning_rate=0.1, random_state=42)
+        }
+        self.scaler = StandardScaler()
+    
+    def create_advanced_features(self, df):
+        """Create advanced features"""
+        features = pd.DataFrame(index=df.index)
+        
+        try:
+            features['returns_1d'] = df['Close'].pct_change(1)
+            features['returns_5d'] = df['Close'].pct_change(5)
+            features['returns_20d'] = df['Close'].pct_change(20)
+            
+            features['volatility_10d'] = df['Close'].pct_change().rolling(10).std()
+            features['volatility_30d'] = df['Close'].pct_change().rolling(30).std()
+            
+            features['rsi'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
+            features['rsi_slope'] = features['rsi'].diff(5)
+            
+            macd = ta.trend.MACD(df['Close'])
+            features['macd'] = macd.macd()
+            features['macd_signal'] = macd.macd_signal()
+            features['macd_diff'] = macd.macd_diff()
+            
+            adx = ta.trend.ADXIndicator(df['High'], df['Low'], df['Close'])
+            features['adx'] = adx.adx()
+            
+            features['volume_ratio'] = df['Volume'] / df['Volume'].rolling(20).mean()
+            
+            return features.fillna(method='ffill').fillna(0)
+        except:
+            return pd.DataFrame()
+    
+    def predict(self, symbol):
+        """Make prediction for a symbol"""
+        try:
+            df = get_stock_data_cached(symbol)
+            if df is None or len(df) < 150:
+                return None
+            
+            features = self.create_advanced_features(df)
+            if features.empty:
+                return None
+            
+            # Simple prediction based on recent trend
+            recent_return = (df['Close'].iloc[-1] / df['Close'].iloc[-10] - 1)
+            
+            if recent_return > 0.05:
+                prediction = 2
+                confidence = min(abs(recent_return) * 1000, 85)
+            elif recent_return > 0.02:
+                prediction = 1
+                confidence = min(abs(recent_return) * 800, 70)
+            else:
+                prediction = 0
+                confidence = 50
+            
+            return {
+                'prediction': prediction,
+                'confidence': confidence
+            }
+        except:
+            return None
+
+# ============================================================================
+# PORTFOLIO MANAGER
+# ============================================================================
+
+class PortfolioManager:
+    """Portfolio analysis and management"""
+    
+    def __init__(self):
+        self.portfolio = []
+    
+    def add_stock(self, symbol, quantity, buy_price):
+        """Add stock to portfolio"""
+        self.portfolio.append({
+            'symbol': symbol,
+            'quantity': quantity,
+            'buy_price': buy_price,
+            'buy_date': datetime.now().strftime('%Y-%m-%d')
+        })
+    
+    def remove_stock(self, symbol):
+        """Remove stock from portfolio"""
+        self.portfolio = [s for s in self.portfolio if s['symbol'] != symbol]
+    
+    def analyze_portfolio(self):
+        """Analyze entire portfolio"""
+        if not self.portfolio:
+            return None
+        
+        results = []
+        total_invested = 0
+        total_current = 0
+        
+        for stock in self.portfolio:
+            symbol = stock['symbol']
+            quantity = stock['quantity']
+            buy_price = stock['buy_price']
+            
+            df = get_stock_data_cached(symbol)
+            if df is None:
+                continue
+            
+            current_price = df['Close'].iloc[-1]
+            invested = quantity * buy_price
+            current_value = quantity * current_price
+            pnl = current_value - invested
+            pnl_pct = (pnl / invested) * 100
+            
+            total_invested += invested
+            total_current += current_value
+            
+            results.append({
+                'Symbol': symbol,
+                'Quantity': quantity,
+                'Buy Price': buy_price,
+                'Current Price': current_price,
+                'Invested': invested,
+                'Current Value': current_value,
+                'P&L': pnl,
+                'P&L %': pnl_pct,
+                'Buy Date': stock['buy_date']
+            })
+        
+        summary = {
+            'total_invested': total_invested,
+            'total_current': total_current,
+            'total_pnl': total_current - total_invested,
+            'total_pnl_pct': ((total_current - total_invested) / total_invested * 100) if total_invested > 0 else 0,
+            'stocks': results
+        }
+        
+        return summary
+
+# ============================================================================
+# STOCK ANALYZER
+# ============================================================================
+
+class StockAnalyzer:
+    """Comprehensive stock analysis"""
+    
+    def analyze_stock(self, symbol):
+        """Comprehensive stock analysis"""
+        try:
+            ticker = yf.Ticker(symbol + ".NS")
+            df = ticker.history(period="2y")
+            
+            if df.empty:
+                return None
+            
+            df = compute_indicators(df)
+            info = ticker.info
+            
+            # Calculate metrics
+            latest = df.iloc[-1]
+            
+            # Price metrics
+            week_52_high = df['High'].rolling(252).max().iloc[-1]
+            week_52_low = df['Low'].rolling(252).min().iloc[-1]
+            current_price = latest['Close']
+            
+            # Returns
+            returns_1m = (current_price / df['Close'].iloc[-21] - 1) * 100 if len(df) > 21 else 0
+            returns_3m = (current_price / df['Close'].iloc[-63] - 1) * 100 if len(df) > 63 else 0
+            returns_6m = (current_price / df['Close'].iloc[-126] - 1) * 100 if len(df) > 126 else 0
+            returns_1y = (current_price / df['Close'].iloc[-252] - 1) * 100 if len(df) > 252 else 0
+            
+            # Volatility
+            volatility = df['Close'].pct_change().std() * np.sqrt(252) * 100
+            
+            # Volume
+            avg_volume = df['Volume'].mean()
+            current_volume = latest['Volume']
+            volume_ratio = current_volume / avg_volume
+            
+            # Technical signals
+            rsi = latest['RSI']
+            macd = latest['MACD']
+            macd_signal = latest['MACD_Signal']
+            adx = latest['ADX']
+            
+            # AI Recommendation
+            recommendation = self.generate_recommendation(df, info)
+            
+            analysis = {
+                'symbol': symbol,
+                'company_name': info.get('longName', symbol),
+                'sector': info.get('sector', 'N/A'),
+                'industry': info.get('industry', 'N/A'),
+                'market_cap': info.get('marketCap', 0),
+                'current_price': current_price,
+                'week_52_high': week_52_high,
+                'week_52_low': week_52_low,
+                'pe_ratio': info.get('trailingPE', 0),
+                'pb_ratio': info.get('priceToBook', 0),
+                'dividend_yield': info.get('dividendYield', 0) * 100 if info.get('dividendYield') else 0,
+                'returns_1m': returns_1m,
+                'returns_3m': returns_3m,
+                'returns_6m': returns_6m,
+                'returns_1y': returns_1y,
+                'volatility': volatility,
+                'avg_volume': avg_volume,
+                'current_volume': current_volume,
+                'volume_ratio': volume_ratio,
+                'rsi': rsi,
+                'macd': macd,
+                'macd_signal': macd_signal,
+                'adx': adx,
+                'recommendation': recommendation,
+                'df': df
+            }
+            
+            return analysis
+            
+        except Exception as e:
+            st.error(f"Error analyzing {symbol}: {e}")
+            return None
+    
+    def generate_recommendation(self, df, info):
+        """Generate AI recommendation"""
+        try:
+            latest = df.iloc[-1]
+            
+            score = 0
+            reasons = []
+            
+            # RSI analysis
+            if latest['RSI'] > 70:
+                score -= 2
+                reasons.append("Overbought (RSI > 70)")
+            elif latest['RSI'] < 30:
+                score += 2
+                reasons.append("Oversold (RSI < 30)")
+            elif 50 < latest['RSI'] < 60:
+                score += 1
+                reasons.append("Healthy RSI")
+            
+            # MACD analysis
+            if latest['MACD'] > latest['MACD_Signal']:
+                score += 2
+                reasons.append("Bullish MACD")
+            else:
+                score -= 1
+                reasons.append("Bearish MACD")
+            
+            # ADX analysis
+            if latest['ADX'] > 25:
+                score += 1
+                reasons.append("Strong trend")
+            
+            # Volume analysis
+            volume_ratio = latest['Volume'] / df['Volume'].mean()
+            if volume_ratio > 1.5:
+                score += 1
+                reasons.append("High volume")
+            
+            # Price vs SMA
+            sma_50 = df['Close'].rolling(50).mean().iloc[-1]
+            if latest['Close'] > sma_50:
+                score += 1
+                reasons.append("Above 50 SMA")
+            else:
+                score -= 1
+                reasons.append("Below 50 SMA")
+            
+            # Generate recommendation
+            if score >= 5:
+                rec = "STRONG BUY"
+                color = "success"
+            elif score >= 3:
+                rec = "BUY"
+                color = "success"
+            elif score >= 1:
+                rec = "HOLD"
+                color = "warning"
+            elif score >= -2:
+                rec = "SELL"
+                color = "warning"
+            else:
+                rec = "STRONG SELL"
+                color = "error"
+            
+            return {
+                'action': rec,
+                'score': score,
+                'reasons': reasons,
+                'color': color
+            }
+            
+        except:
+            return {
+                'action': 'HOLD',
+                'score': 0,
+                'reasons': ['Insufficient data'],
+                'color': 'warning'
+            }
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+def compute_indicators(df):
+    """Compute technical indicators"""
+    if df is None or len(df) < 30:
+        return df
+    
+    try:
+        bb = ta.volatility.BollingerBands(df['Close'], window=20)
+        df['BB_upper'] = bb.bollinger_hband()
+        df['BB_lower'] = bb.bollinger_lband()
+        
+        df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
+        
+        macd = ta.trend.MACD(df['Close'])
+        df['MACD'] = macd.macd()
+        df['MACD_Signal'] = macd.macd_signal()
+        
+        adx = ta.trend.ADXIndicator(df['High'], df['Low'], df['Close'], window=14)
+        df['+DMI'] = adx.adx_pos()
+        df['-DMI'] = adx.adx_neg()
+        df['ADX'] = adx.adx()
+        
+        df['Vol_MA'] = df['Volume'].rolling(20).mean()
+    except:
+        pass
+    
+    return df
+
+def format_number(num):
+    """Format large numbers"""
+    if num >= 1e12:
+        return f"₹{num/1e12:.2f}T"
+    elif num >= 1e9:
+        return f"₹{num/1e9:.2f}B"
+    elif num >= 1e7:
+        return f"₹{num/1e7:.2f}Cr"
+    elif num >= 1e5:
+        return f"₹{num/1e5:.2f}L"
+    else:
+        return f"₹{num:.2f}"
+
+# ============================================================================
+# STREAMLIT APP
+# ============================================================================
+
+st.set_page_config(
+    page_title="Artha Drishti - ML Stock Screener",
+    page_icon="👁️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS with logo
+st.markdown("""
+    <style>
+    .main-header {
+        font-size: 3rem;
+        font-weight: bold;
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        text-align: center;
+        padding: 1rem 0;
+    }
+    .logo-container {
+        text-align: center;
+        padding: 2rem 0;
+    }
+    .tagline {
+        text-align: center;
+        color: #666;
+        font-size: 1.2rem;
+        margin-top: -1rem;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background: #f8f9fa;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #667eea;
+    }
+    .recommendation-strong-buy { 
+        background: #10b981; 
+        color: white; 
+        padding: 0.5rem 1rem; 
+        border-radius: 0.5rem; 
+        font-weight: bold;
+        display: inline-block;
+    }
+    .recommendation-buy { 
+        background: #34d399; 
+        color: white; 
+        padding: 0.5rem 1rem; 
+        border-radius: 0.5rem; 
+        font-weight: bold;
+        display: inline-block;
+    }
+    .recommendation-hold { 
+        background: #fbbf24; 
+        color: white; 
+        padding: 0.5rem 1rem; 
+        border-radius: 0.5rem; 
+        font-weight: bold;
+        display: inline-block;
+    }
+    .recommendation-sell { 
+        background: #f97316; 
+        color: white; 
+        padding: 0.5rem 1rem; 
+        border-radius: 0.5rem; 
+        font-weight: bold;
+        display: inline-block;
+    }
+    .recommendation-strong-sell { 
+        background: #ef4444; 
+        color: white; 
+        padding: 0.5rem 1rem; 
+        border-radius: 0.5rem; 
+        font-weight: bold;
+        display: inline-block;
+    }
+    .prediction-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 1.5rem;
+        border-radius: 1rem;
+        margin: 1rem 0;
+    }
+    .sentiment-positive {
+        color: #10b981;
+        font-weight: bold;
+    }
+    .sentiment-negative {
+        color: #ef4444;
+        font-weight: bold;
+    }
+    .sentiment-neutral {
+        color: #f59e0b;
+        font-weight: bold;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# Initialize session state
+if 'nse_stocks' not in st.session_state:
+    st.session_state.nse_stocks = None
+if 'screened_stocks' not in st.session_state:
+    st.session_state.screened_stocks = None
+if 'strategy_engine' not in st.session_state:
+    st.session_state.strategy_engine = StrategyEngine()
+if 'ml_predictor' not in st.session_state:
+    st.session_state.ml_predictor = EnhancedMLPredictor()
+if 'portfolio_manager' not in st.session_state:
+    st.session_state.portfolio_manager = PortfolioManager()
+if 'stock_analyzer' not in st.session_state:
+    st.session_state.stock_analyzer = StockAnalyzer()
+if 'news_analyzer' not in st.session_state:
+    st.session_state.news_analyzer = NewsSentimentAnalyzer(NEWS_API_KEY)
+if 'price_predictor' not in st.session_state:
+    st.session_state.price_predictor = PricePredictor()
+
+# Load NSE stocks
+if st.session_state.nse_stocks is None:
+    with st.spinner("Loading NSE stocks..."):
+        st.session_state.nse_stocks = load_nse_stocks()
+
+# Header with logo
+st.markdown("""
+    <div class="logo-container">
+        <h1 style="color: #667eea; font-size: 3.5rem; margin: 0;">
+            👁️ ARTHA DRISHTI
+        </h1>
+    </div>
+""", unsafe_allow_html=True)
+st.markdown('<p class="tagline">ML Based Advanced Stock Screener</p>', unsafe_allow_html=True)
+
+# Sidebar
+with st.sidebar:
+    st.markdown("## 🎯 Navigation")
+    
+    page = st.radio(
+        "Select Page",
+        ["🔍 Stock Screener", "📊 Custom Strategy", "💼 Portfolio", "💹 Stock Analysis"],
+        label_visibility="collapsed"
+    )
+    
+    st.markdown("---")
+    st.markdown(f"**Total NSE Stocks:** {len(st.session_state.nse_stocks)}")
+
+# ============================================================================
+# HELPER FUNCTION FOR STOCK ANALYSIS DISPLAY
+# ============================================================================
+
+def _display_stock_analysis(analysis, news_data, prediction):
+    """Helper function to display stock analysis"""
+    
+    # Header info
+    st.markdown(f"### {analysis['company_name']} ({analysis['symbol']})")
+    st.markdown(f"**Sector:** {analysis['sector']} | **Industry:** {analysis['industry']}")
+    
+    # AI Recommendation
+    rec = analysis['recommendation']
+    st.markdown(f"<div class='recommendation-{rec['action'].lower().replace(' ', '-')}'>"
+               f"AI RECOMMENDATION: {rec['action']} (Score: {rec['score']})</div>",
+               unsafe_allow_html=True)
+    
+    st.markdown("**Reasons:**")
+    for reason in rec['reasons']:
+        st.markdown(f"- {reason}")
+    
+    st.markdown("---")
+    
+    # ============ PRICE PREDICTION SECTION ============
+    if prediction:
+        st.markdown("## 🎯 Price Prediction & Trading Levels")
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.markdown(f"""
+                <div class='prediction-card'>
+                    <h3 style='margin-top: 0;'>Target Price Prediction</h3>
+                    <div style='display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem;'>
+                        <div>
+                            <p style='margin: 0; opacity: 0.8;'>Conservative Target</p>
+                            <h2 style='margin: 0.5rem 0;'>₹{prediction['conservative_target']:.2f}</h2>
+                        </div>
+                        <div>
+                            <p style='margin: 0; opacity: 0.8;'>Primary Target</p>
+                            <h2 style='margin: 0.5rem 0;'>₹{prediction['target_price']:.2f}</h2>
+                        </div>
+                        <div>
+                            <p style='margin: 0; opacity: 0.8;'>Aggressive Target</p>
+                            <h2 style='margin: 0.5rem 0;'>₹{prediction['aggressive_target']:.2f}</h2>
+                        </div>
+                        <div>
+                            <p style='margin: 0; opacity: 0.8;'>Expected Return</p>
+                            <h2 style='margin: 0.5rem 0;'>{prediction['expected_return']:.2f}%</h2>
+                        </div>
+                    </div>
+                    <p style='margin-top: 1rem; opacity: 0.9;'>
+                        <strong>Confidence:</strong> {prediction['confidence']:.1f}% | 
+                        <strong>Time Horizon:</strong> {prediction['time_horizon']} days
+                    </p>
+                </div>
+            """, unsafe_allow_html=True)
+        
+        with col2:
+            # Trading levels
+            st.markdown("### 📊 Key Levels")
+            st.metric("Current Price", f"₹{prediction['current_price']:.2f}")
+            st.metric("Buy Price", f"₹{prediction['buy_price']:.2f}", 
+                     delta=f"{((prediction['buy_price']/prediction['current_price']-1)*100):.2f}%")
+            st.metric("Sell Price", f"₹{prediction['sell_price']:.2f}",
+                     delta=f"{((prediction['sell_price']/prediction['current_price']-1)*100):.2f}%")
+            st.metric("Stop Loss", f"₹{prediction['stop_loss']:.2f}",
+                     delta=f"{((prediction['stop_loss']/prediction['current_price']-1)*100):.2f}%")
+        
+        # Detailed prediction metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Risk/Reward", f"{prediction['risk_reward']:.2f}")
+        with col2:
+            st.metric("Support", f"₹{prediction['support']:.2f}")
+        with col3:
+            st.metric("Resistance", f"₹{prediction['resistance']:.2f}")
+        with col4:
+            st.metric("Pivot Point", f"₹{prediction['pivot_points']['pivot']:.2f}")
+        
+        # Score breakdown
+        st.markdown("#### 📈 Prediction Score Breakdown")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            tech_score = prediction['technical_score']
+            st.metric("Technical Score", f"{tech_score:.1f}/100")
+            st.progress(min(abs(tech_score)/100, 1.0))
+        
+        with col2:
+            sent_score = prediction['sentiment_score']
+            st.metric("Sentiment Score", f"{sent_score:.1f}/100")
+            st.progress(min(abs(sent_score)/100, 1.0))
+        
+        with col3:
+            fund_score = prediction['fundamental_score']
+            st.metric("Fundamental Score", f"{fund_score:.1f}/100")
+            st.progress(min(abs(fund_score)/100, 1.0))
+        
+        st.markdown("---")
+    
+    # ============ NEWS SENTIMENT SECTION ============
+    if news_data and news_data.get('news_count', 0) > 0:
+        st.markdown("## 📰 News Sentiment Analysis")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            sentiment = news_data['overall_sentiment']
+            sentiment_class = f"sentiment-{sentiment.lower()}"
+            st.markdown(f"**Overall Sentiment**")
+            st.markdown(f"<p class='{sentiment_class}'>{sentiment}</p>", unsafe_allow_html=True)
+        
+        with col2:
+            st.metric("Total News", news_data['news_count'])
+        
+        with col3:
+            st.metric("Positive", news_data['positive_count'], 
+                     delta=f"{(news_data['positive_count']/news_data['news_count']*100):.0f}%")
+        
+        with col4:
+            st.metric("Negative", news_data['negative_count'],
+                     delta=f"{(news_data['negative_count']/news_data['news_count']*100):.0f}%",
+                     delta_color="inverse")
+        
+        # Sentiment score gauge
+        score = news_data['sentiment_score']
+        fig_gauge = go.Figure(go.Indicator(
+            mode="gauge+number+delta",
+            value=score,
+            domain={'x': [0, 1], 'y': [0, 1]},
+            title={'text': "Sentiment Score"},
+            delta={'reference': 0},
+            gauge={
+                'axis': {'range': [-1, 1]},
+                'bar': {'color': "darkblue"},
+                'steps': [
+                    {'range': [-1, -0.3], 'color': "lightcoral"},
+                    {'range': [-0.3, 0.3], 'color': "lightyellow"},
+                    {'range': [0.3, 1], 'color': "lightgreen"}
+                ],
+                'threshold': {
+                    'line': {'color': "red", 'width': 4},
+                    'thickness': 0.75,
+                    'value': 0
+                }
+            }
+        ))
+        fig_gauge.update_layout(height=300)
+        st.plotly_chart(fig_gauge, use_container_width=True)
+        
+        # Recent news articles
+        st.markdown("### 📑 Recent News")
+        
+        for i, article in enumerate(news_data['articles'][:5], 1):
+            sentiment_class = f"sentiment-{article['sentiment'].lower()}"
+            
+            with st.expander(f"{i}. {article['title'][:100]}..."):
+                st.markdown(f"**Sentiment:** <span class='{sentiment_class}'>{article['sentiment']}</span> "
+                          f"(Score: {article['score']:.2f})", unsafe_allow_html=True)
+                st.markdown(f"**Published:** {article['publishedAt'][:10]}")
+                st.markdown(f"**Description:** {article['description']}")
+                st.markdown(f"[Read more]({article['url']})")
+        
+        st.markdown("---")
+    elif news_data and news_data.get('news_count', 0) == 0:
+        st.info("📰 No recent news found for this stock")
+        st.markdown("---")
+    
+    # Key Metrics
+    st.markdown("### 📊 Key Metrics")
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.metric("Current Price", f"₹{analysis['current_price']:.2f}")
+    with col2:
+        st.metric("Market Cap", format_number(analysis['market_cap']))
+    with col3:
+        st.metric("P/E Ratio", f"{analysis['pe_ratio']:.2f}")
+    with col4:
+        st.metric("P/B Ratio", f"{analysis['pb_ratio']:.2f}")
+    with col5:
+        st.metric("Div Yield", f"{analysis['dividend_yield']:.2f}%")
+    
+    st.markdown("---")
+    
+    # Performance Metrics
+    st.markdown("### 📈 Performance")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("1 Month", f"{analysis['returns_1m']:.2f}%")
+    with col2:
+        st.metric("3 Months", f"{analysis['returns_3m']:.2f}%")
+    with col3:
+        st.metric("6 Months", f"{analysis['returns_6m']:.2f}%")
+    with col4:
+        st.metric("1 Year", f"{analysis['returns_1y']:.2f}%")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("52W High", f"₹{analysis['week_52_high']:.2f}")
+    with col2:
+        st.metric("52W Low", f"₹{analysis['week_52_low']:.2f}")
+    with col3:
+        st.metric("Volatility", f"{analysis['volatility']:.2f}%")
+    
+    st.markdown("---")
+    
+    # Technical Indicators
+    st.markdown("### 🔧 Technical Indicators")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        rsi = analysis['rsi']
+        rsi_color = "🟢" if 30 < rsi < 70 else "🔴"
+        st.metric("RSI", f"{rsi:.2f} {rsi_color}")
+    
+    with col2:
+        macd = analysis['macd']
+        macd_color = "🟢" if macd > analysis['macd_signal'] else "🔴"
+        st.metric("MACD", f"{macd:.2f} {macd_color}")
+    
+    with col3:
+        adx = analysis['adx']
+        adx_color = "🟢" if adx > 25 else "🟡"
+        st.metric("ADX", f"{adx:.2f} {adx_color}")
+    
+    with col4:
+        vol_ratio = analysis['volume_ratio']
+        vol_color = "🟢" if vol_ratio > 1 else "🔴"
+        st.metric("Volume Ratio", f"{vol_ratio:.2f} {vol_color}")
+    
+    st.markdown("---")
+    
+    # Charts
+    st.markdown("### 📉 Charts")
+    
+    df = analysis['df']
+    
+    # Price chart with indicators
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.5, 0.25, 0.25],
+        subplot_titles=('Price & Bollinger Bands', 'RSI', 'MACD')
+    )
+    
+    # Candlestick
+    fig.add_trace(
+        go.Candlestick(
+            x=df.index,
+            open=df['Open'],
+            high=df['High'],
+            low=df['Low'],
+            close=df['Close'],
+            name='Price'
+        ),
+        row=1, col=1
+    )
+    
+    # Bollinger Bands
+    fig.add_trace(go.Scatter(x=df.index, y=df['BB_upper'], 
+                            line=dict(dash='dash', color='gray', width=1),
+                            name='BB Upper'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['BB_lower'], 
+                            line=dict(dash='dash', color='gray', width=1),
+                            name='BB Lower'), row=1, col=1)
+    
+    # RSI
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], 
+                            line=dict(color='purple'),
+                            name='RSI'), row=2, col=1)
+    fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+    fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+    
+    # MACD
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], 
+                            line=dict(color='blue'),
+                            name='MACD'), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], 
+                            line=dict(color='red'),
+                            name='Signal'), row=3, col=1)
+    
+    fig.update_layout(height=800, showlegend=False, xaxis_rangeslider_visible=False)
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # Volume chart
+    st.markdown("### 📊 Volume Analysis")
+    
+    fig_vol = go.Figure()
+    
+    colors = ['red' if df['Close'].iloc[i] < df['Open'].iloc[i] else 'green' 
+             for i in range(len(df))]
+    
+    fig_vol.add_trace(go.Bar(
+        x=df.index,
+        y=df['Volume'],
+        marker_color=colors,
+        name='Volume'
+    ))
+    
+    fig_vol.add_trace(go.Scatter(
+        x=df.index,
+        y=df['Vol_MA'],
+        line=dict(color='orange', width=2),
+        name='Avg Volume'
+    ))
+    
+    fig_vol.update_layout(height=300)
+    st.plotly_chart(fig_vol, use_container_width=True)
+
+
+# ============================================================================
+# PAGE 1: STOCK SCREENER
+# ============================================================================
+
+if page == "🔍 Stock Screener":
+    st.markdown("## 🔍 Stock Screener")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        strategy_name = st.selectbox(
+            "Select Strategy",
+            list(st.session_state.strategy_engine.strategies.keys())
+        )
+    
+    with col2:
+        min_confidence = st.slider("Min Confidence %", 50, 90, 60)
+    
+    with col3:
+        max_stocks = st.number_input("Max Stocks to Scan", 50, 2200, 100)
+    
+    # Display strategy description
+    strategy_desc = st.session_state.strategy_engine.strategies[strategy_name]['description']
+    st.info(f"**Strategy:** {strategy_desc}")
+    
+    if st.button("🚀 Start Screening", type="primary", use_container_width=True):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        stocks_to_scan = st.session_state.nse_stocks[:max_stocks]
+        results = []
+        
+        for i, symbol in enumerate(stocks_to_scan):
+            status_text.text(f"Screening {symbol}... ({i+1}/{len(stocks_to_scan)})")
+            
+            try:
+                df = get_stock_data_cached(symbol)
+                if df is None:
+                    continue
+                
+                result = st.session_state.strategy_engine.evaluate_strategy(df, strategy_name)
+                
+                if result and result['confidence'] >= min_confidence:
+                    ml_pred = st.session_state.ml_predictor.predict(symbol)
+                    current_price = df['Close'].iloc[-1]
+                    
+                    # Get quick price predictions
+                    try:
+                        prediction = st.session_state.price_predictor.predict_target_price(
+                            df, sentiment_score=0, fundamental_score=50
+                        )
+                        buy_price = prediction['buy_price'] if prediction else current_price * 0.98
+                        target_price = prediction['target_price'] if prediction else current_price * 1.05
+                        stop_loss = prediction['stop_loss'] if prediction else current_price * 0.97
+                        expected_return = prediction['expected_return'] if prediction else 5.0
+                        pred_confidence = prediction['confidence'] if prediction else 50
+                    except:
+                        buy_price = current_price * 0.98
+                        target_price = current_price * 1.05
+                        stop_loss = current_price * 0.97
+                        expected_return = 5.0
+                        pred_confidence = 50
+                    
+                    results.append({
+                        'Symbol': symbol,
+                        'Current Price': current_price,
+                        'Buy Price': buy_price,
+                        'Target Price': target_price,
+                        'Stop Loss': stop_loss,
+                        'Expected Return %': expected_return,
+                        'Strategy Confidence': result['confidence'],
+                        'Prediction Confidence': pred_confidence,
+                        'Conditions Met': result['conditions_met'],
+                        'Total Conditions': result['total_conditions'],
+                        'ML Prediction': ml_pred['prediction'] if ml_pred else 0,
+                        'ML Confidence': ml_pred['confidence'] if ml_pred else 0
+                    })
+            except:
+                pass
+            
+            progress_bar.progress((i + 1) / len(stocks_to_scan))
+        
+        status_text.text("✅ Screening Complete!")
+        
+        if results:
+            st.session_state.screened_stocks = pd.DataFrame(results).sort_values(
+                'Strategy Confidence', ascending=False
+            )
+            st.success(f"Found {len(results)} stocks matching criteria!")
+        else:
+            st.warning("No stocks found. Try adjusting filters.")
+    
+    # Display results
+    if st.session_state.screened_stocks is not None:
+        st.markdown("---")
+        st.markdown("## 📊 Results")
+        
+        df = st.session_state.screened_stocks
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Stocks", len(df))
+        with col2:
+            st.metric("Avg Strategy Confidence", f"{df['Strategy Confidence'].mean():.1f}%")
+        with col3:
+            high = len(df[df['Strategy Confidence'] >= 75])
+            st.metric("High Confidence", high)
+        with col4:
+            bullish = len(df[df['ML Prediction'] >= 1])
+            st.metric("Bullish (ML)", bullish)
+        
+        # Format display columns
+        display_df = df.copy()
+        display_df['Current Price'] = display_df['Current Price'].apply(lambda x: f"₹{x:.2f}")
+        display_df['Buy Price'] = display_df['Buy Price'].apply(lambda x: f"₹{x:.2f}")
+        display_df['Target Price'] = display_df['Target Price'].apply(lambda x: f"₹{x:.2f}")
+        display_df['Stop Loss'] = display_df['Stop Loss'].apply(lambda x: f"₹{x:.2f}")
+        display_df['Expected Return %'] = display_df['Expected Return %'].apply(lambda x: f"{x:.2f}%")
+        display_df['Strategy Confidence'] = display_df['Strategy Confidence'].apply(lambda x: f"{x:.1f}%")
+        display_df['Prediction Confidence'] = display_df['Prediction Confidence'].apply(lambda x: f"{x:.1f}%")
+        
+        st.dataframe(display_df, use_container_width=True, height=400)
+        
+        # Action buttons
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            csv = df.to_csv(index=False)
+            st.download_button(
+                "📥 Download Results",
+                csv,
+                f"screening_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                "text/csv",
+                use_container_width=True
+            )
+        
+        with col2:
+            # Quick analyze option
+            selected_symbol = st.selectbox(
+                "Select stock to analyze in detail",
+                df['Symbol'].tolist(),
+                key="quick_analyze_select"
+            )
+        
+        if st.button("🔍 Analyze Selected Stock", type="primary", use_container_width=True):
+            with st.spinner(f"Analyzing {selected_symbol}..."):
+                # Switch to analysis page and analyze
+                analysis = st.session_state.stock_analyzer.analyze_stock(selected_symbol)
+                
+                if analysis:
+                    st.session_state.current_analysis = analysis
+                    
+                    # Get news sentiment
+                    with st.spinner("Analyzing news sentiment..."):
+                        news_data = st.session_state.news_analyzer.analyze_stock_news(
+                            selected_symbol, analysis.get('company_name', selected_symbol)
+                        )
+                        st.session_state.current_news = news_data
+                    
+                    # Get price prediction
+                    with st.spinner("Predicting target prices..."):
+                        prediction = st.session_state.price_predictor.predict_target_price(
+                            analysis['df'],
+                            sentiment_score=news_data['sentiment_score'],
+                            fundamental_score=50
+                        )
+                        st.session_state.current_prediction = prediction
+                    
+                    st.success(f"✅ Analysis complete! Scroll down to view detailed analysis of {selected_symbol}")
+                    
+                    # Display analysis immediately below
+                    st.markdown("---")
+                    st.markdown(f"## 💹 Detailed Analysis: {selected_symbol}")
+                    
+                    # Show the full analysis
+                    _display_stock_analysis(analysis, news_data, prediction)
+                else:
+                    st.error("Failed to analyze stock")
+
+# ============================================================================
+# PAGE 2: CUSTOM STRATEGY
+# ============================================================================
+
+elif page == "📊 Custom Strategy":
+    st.markdown("## 📊 Custom Strategy Builder")
+    
+    st.info("💡 Build your own screening strategy by selecting indicators and conditions")
+    
+    tab1, tab2 = st.tabs(["Create Strategy", "Manage Strategies"])
+    
+    with tab1:
+        st.markdown("### Create New Strategy")
+        
+        strategy_name = st.text_input("Strategy Name", "My Custom Strategy")
+        strategy_desc = st.text_area("Description", "Enter strategy description...")
+        
+        st.markdown("#### Add Rules")
+        
+        num_rules = st.number_input("Number of Rules", 1, 10, 3)
+        
+        rules = []
+        for i in range(num_rules):
+            st.markdown(f"**Rule {i+1}**")
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                indicator = st.selectbox(f"Indicator", 
+                    list(st.session_state.strategy_engine.AVAILABLE_INDICATORS.keys()),
+                    key=f"ind_{i}")
+            
+            with col2:
+                if indicator in ['MACD', 'EMA_Cross', 'SMA_Cross']:
+                    condition = st.selectbox(f"Condition",
+                        ['bullish', 'bullish_cross', 'turning_up'],
+                        key=f"cond_{i}")
+                elif indicator == 'RSI':
+                    condition = st.selectbox(f"Condition",
+                        ['above', 'below', 'between'],
+                        key=f"cond_{i}")
+                else:
+                    condition = st.selectbox(f"Condition",
+                        ['above', 'below', 'above_avg'],
+                        key=f"cond_{i}")
+            
+            with col3:
+                threshold = st.number_input(f"Threshold", 0, 100, 50, key=f"thresh_{i}")
+            
+            with col4:
+                weight = st.slider(f"Weight", 0.5, 3.0, 1.0, 0.5, key=f"weight_{i}")
+            
+            rules.append({
+                'indicator': indicator,
+                'condition': condition,
+                'threshold': threshold,
+                'weight': weight
+            })
+        
+        if st.button("Save Strategy", type="primary"):
+            st.session_state.strategy_engine.strategies[strategy_name] = {
+                'description': strategy_desc,
+                'rules': rules
+            }
+            st.success(f"✅ Strategy '{strategy_name}' saved!")
+    
+    with tab2:
+        st.markdown("### Saved Strategies")
+        
+        for name, strategy in st.session_state.strategy_engine.strategies.items():
+            with st.expander(f"📋 {name}"):
+                st.write(f"**Description:** {strategy['description']}")
+                st.write(f"**Rules:** {len(strategy['rules'])}")
+                
+                for i, rule in enumerate(strategy['rules'], 1):
+                    st.write(f"{i}. {rule['indicator']} - {rule['condition']} (weight: {rule.get('weight', 1.0)})")
+
+# ============================================================================
+# PAGE 3: PORTFOLIO
+# ============================================================================
+
+elif page == "💼 Portfolio":
+    st.markdown("## 💼 Portfolio Management")
+    
+    tab1, tab2, tab3 = st.tabs(["My Portfolio", "Add Stock", "Analysis"])
+    
+    with tab1:
+        st.markdown("### My Portfolio")
+        
+        if st.session_state.portfolio_manager.portfolio:
+            analysis = st.session_state.portfolio_manager.analyze_portfolio()
+            
+            if analysis:
+                # Summary metrics
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.metric("Total Invested", format_number(analysis['total_invested']))
+                with col2:
+                    st.metric("Current Value", format_number(analysis['total_current']))
+                with col3:
+                    pnl = analysis['total_pnl']
+                    st.metric("P&L", format_number(pnl), delta=f"{analysis['total_pnl_pct']:.2f}%")
+                with col4:
+                    returns = analysis['total_pnl_pct']
+                    st.metric("Returns", f"{returns:.2f}%")
+                
+                # Portfolio table
+                st.markdown("---")
+                df_portfolio = pd.DataFrame(analysis['stocks'])
+                st.dataframe(df_portfolio, use_container_width=True)
+                
+                # Remove stock
+                st.markdown("---")
+                stock_to_remove = st.selectbox(
+                    "Remove Stock",
+                    [s['symbol'] for s in st.session_state.portfolio_manager.portfolio]
+                )
+                if st.button("Remove"):
+                    st.session_state.portfolio_manager.remove_stock(stock_to_remove)
+                    st.rerun()
+        else:
+            st.info("📊 Your portfolio is empty. Add stocks to get started!")
+    
+    with tab2:
+        st.markdown("### Add Stock to Portfolio")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            symbol = st.selectbox("Stock Symbol", st.session_state.nse_stocks)
+        
+        with col2:
+            quantity = st.number_input("Quantity", min_value=1, value=100)
+        
+        with col3:
+            buy_price = st.number_input("Buy Price (₹)", min_value=0.01, value=100.0)
+        
+        if st.button("Add to Portfolio", type="primary"):
+            st.session_state.portfolio_manager.add_stock(symbol, quantity, buy_price)
+            st.success(f"✅ Added {quantity} shares of {symbol} to portfolio!")
+            st.rerun()
+    
+    with tab3:
+        st.markdown("### Portfolio Analysis")
+        
+        if st.session_state.portfolio_manager.portfolio:
+            st.markdown("#### Individual Stock Performance")
+            
+            for stock in st.session_state.portfolio_manager.portfolio:
+                symbol = stock['symbol']
+                
+                with st.expander(f"📊 {symbol}"):
+                    analysis = st.session_state.stock_analyzer.analyze_stock(symbol)
+                    
+                    if analysis:
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            st.metric("Current Price", f"₹{analysis['current_price']:.2f}")
+                        with col2:
+                            st.metric("1M Return", f"{analysis['returns_1m']:.2f}%")
+                        with col3:
+                            rec = analysis['recommendation']['action']
+                            st.markdown(f"<div class='recommendation-{rec.lower().replace(' ', '-')}'>{rec}</div>", 
+                                      unsafe_allow_html=True)
+                        
+                        # Mini chart
+                        if analysis['df'] is not None:
+                            fig = go.Figure()
+                            fig.add_trace(go.Scatter(
+                                x=analysis['df'].index[-60:],
+                                y=analysis['df']['Close'][-60:],
+                                mode='lines',
+                                name='Price',
+                                line=dict(color='#667eea', width=2)
+                            ))
+                            fig.update_layout(height=200, margin=dict(l=0, r=0, t=0, b=0))
+                            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Add stocks to your portfolio first!")
+
+# ============================================================================
+# PAGE 4: STOCK ANALYSIS
+# ============================================================================
+
+elif page == "💹 Stock Analysis":
+    st.markdown("## 💹 Detailed Stock Analysis")
+    
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        symbol = st.selectbox("Select Stock", st.session_state.nse_stocks)
+    
+    with col2:
+        if st.button("🔍 Analyze", type="primary", use_container_width=True):
+            with st.spinner(f"Analyzing {symbol}..."):
+                analysis = st.session_state.stock_analyzer.analyze_stock(symbol)
+                
+                if analysis:
+                    st.session_state.current_analysis = analysis
+                    
+                    # Get news sentiment
+                    with st.spinner("Analyzing news sentiment..."):
+                        news_data = st.session_state.news_analyzer.analyze_stock_news(
+                            symbol, analysis.get('company_name', symbol)
+                        )
+                        st.session_state.current_news = news_data
+                    
+                    # Get price prediction
+                    with st.spinner("Predicting target prices..."):
+                        prediction = st.session_state.price_predictor.predict_target_price(
+                            analysis['df'],
+                            sentiment_score=news_data['sentiment_score'],
+                            fundamental_score=50  # Can be enhanced with actual fundamental data
+                        )
+                        st.session_state.current_prediction = prediction
+                else:
+                    st.error("Failed to analyze stock")
+    
+    if 'current_analysis' in st.session_state:
+        analysis = st.session_state.current_analysis
+        news_data = st.session_state.get('current_news', {})
+        prediction = st.session_state.get('current_prediction', None)
+        
+        # Header info
+        st.markdown(f"### {analysis['company_name']} ({analysis['symbol']})")
+        st.markdown(f"**Sector:** {analysis['sector']} | **Industry:** {analysis['industry']}")
+        
+        # AI Recommendation
+        rec = analysis['recommendation']
+        st.markdown(f"<div class='recommendation-{rec['action'].lower().replace(' ', '-')}'>"
+                   f"AI RECOMMENDATION: {rec['action']} (Score: {rec['score']})</div>",
+                   unsafe_allow_html=True)
+        
+        st.markdown("**Reasons:**")
+        for reason in rec['reasons']:
+            st.markdown(f"- {reason}")
+        
+        st.markdown("---")
+        
+        # ============ PRICE PREDICTION SECTION ============
+        if prediction:
+            st.markdown("## 🎯 Price Prediction & Trading Levels")
+            
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                st.markdown(f"""
+                    <div class='prediction-card'>
+                        <h3 style='margin-top: 0;'>Target Price Prediction</h3>
+                        <div style='display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem;'>
+                            <div>
+                                <p style='margin: 0; opacity: 0.8;'>Conservative Target</p>
+                                <h2 style='margin: 0.5rem 0;'>₹{prediction['conservative_target']:.2f}</h2>
+                            </div>
+                            <div>
+                                <p style='margin: 0; opacity: 0.8;'>Primary Target</p>
+                                <h2 style='margin: 0.5rem 0;'>₹{prediction['target_price']:.2f}</h2>
+                            </div>
+                            <div>
+                                <p style='margin: 0; opacity: 0.8;'>Aggressive Target</p>
+                                <h2 style='margin: 0.5rem 0;'>₹{prediction['aggressive_target']:.2f}</h2>
+                            </div>
+                            <div>
+                                <p style='margin: 0; opacity: 0.8;'>Expected Return</p>
+                                <h2 style='margin: 0.5rem 0;'>{prediction['expected_return']:.2f}%</h2>
+                            </div>
+                        </div>
+                        <p style='margin-top: 1rem; opacity: 0.9;'>
+                            <strong>Confidence:</strong> {prediction['confidence']:.1f}% | 
+                            <strong>Time Horizon:</strong> {prediction['time_horizon']} days
+                        </p>
+                    </div>
+                """, unsafe_allow_html=True)
+            
+            with col2:
+                # Trading levels
+                st.markdown("### 📊 Key Levels")
+                st.metric("Current Price", f"₹{prediction['current_price']:.2f}")
+                st.metric("Buy Price", f"₹{prediction['buy_price']:.2f}", 
+                         delta=f"{((prediction['buy_price']/prediction['current_price']-1)*100):.2f}%")
+                st.metric("Sell Price", f"₹{prediction['sell_price']:.2f}",
+                         delta=f"{((prediction['sell_price']/prediction['current_price']-1)*100):.2f}%")
+                st.metric("Stop Loss", f"₹{prediction['stop_loss']:.2f}",
+                         delta=f"{((prediction['stop_loss']/prediction['current_price']-1)*100):.2f}%")
+            
+            # Detailed prediction metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Risk/Reward", f"{prediction['risk_reward']:.2f}")
+            with col2:
+                st.metric("Support", f"₹{prediction['support']:.2f}")
+            with col3:
+                st.metric("Resistance", f"₹{prediction['resistance']:.2f}")
+            with col4:
+                st.metric("Pivot Point", f"₹{prediction['pivot_points']['pivot']:.2f}")
+            
+            # Score breakdown
+            st.markdown("#### 📈 Prediction Score Breakdown")
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                tech_score = prediction['technical_score']
+                st.metric("Technical Score", f"{tech_score:.1f}/100")
+                st.progress(min(abs(tech_score)/100, 1.0))
+            
+            with col2:
+                sent_score = prediction['sentiment_score']
+                st.metric("Sentiment Score", f"{sent_score:.1f}/100")
+                st.progress(min(abs(sent_score)/100, 1.0))
+            
+            with col3:
+                fund_score = prediction['fundamental_score']
+                st.metric("Fundamental Score", f"{fund_score:.1f}/100")
+                st.progress(min(abs(fund_score)/100, 1.0))
+            
+            st.markdown("---")
+        
+        # ============ NEWS SENTIMENT SECTION ============
+        if news_data and news_data.get('news_count', 0) > 0:
+            st.markdown("## 📰 News Sentiment Analysis")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                sentiment = news_data['overall_sentiment']
+                sentiment_class = f"sentiment-{sentiment.lower()}"
+                st.markdown(f"**Overall Sentiment**")
+                st.markdown(f"<p class='{sentiment_class}'>{sentiment}</p>", unsafe_allow_html=True)
+            
+            with col2:
+                st.metric("Total News", news_data['news_count'])
+            
+            with col3:
+                st.metric("Positive", news_data['positive_count'], 
+                         delta=f"{(news_data['positive_count']/news_data['news_count']*100):.0f}%")
+            
+            with col4:
+                st.metric("Negative", news_data['negative_count'],
+                         delta=f"{(news_data['negative_count']/news_data['news_count']*100):.0f}%",
+                         delta_color="inverse")
+            
+            # Sentiment score gauge
+            score = news_data['sentiment_score']
+            fig_gauge = go.Figure(go.Indicator(
+                mode="gauge+number+delta",
+                value=score,
+                domain={'x': [0, 1], 'y': [0, 1]},
+                title={'text': "Sentiment Score"},
+                delta={'reference': 0},
+                gauge={
+                    'axis': {'range': [-1, 1]},
+                    'bar': {'color': "darkblue"},
+                    'steps': [
+                        {'range': [-1, -0.3], 'color': "lightcoral"},
+                        {'range': [-0.3, 0.3], 'color': "lightyellow"},
+                        {'range': [0.3, 1], 'color': "lightgreen"}
+                    ],
+                    'threshold': {
+                        'line': {'color': "red", 'width': 4},
+                        'thickness': 0.75,
+                        'value': 0
+                    }
+                }
+            ))
+            fig_gauge.update_layout(height=300)
+            st.plotly_chart(fig_gauge, use_container_width=True)
+            
+            # Recent news articles
+            st.markdown("### 📑 Recent News")
+            
+            for i, article in enumerate(news_data['articles'][:5], 1):
+                sentiment_class = f"sentiment-{article['sentiment'].lower()}"
+                
+                with st.expander(f"{i}. {article['title'][:100]}..."):
+                    st.markdown(f"**Sentiment:** <span class='{sentiment_class}'>{article['sentiment']}</span> "
+                              f"(Score: {article['score']:.2f})", unsafe_allow_html=True)
+                    st.markdown(f"**Published:** {article['publishedAt'][:10]}")
+                    st.markdown(f"**Description:** {article['description']}")
+                    st.markdown(f"[Read more]({article['url']})")
+            
+            st.markdown("---")
+        elif news_data and news_data.get('news_count', 0) == 0:
+            st.info("📰 No recent news found for this stock")
+            st.markdown("---")
+        
+        # Key Metrics
+        st.markdown("### 📊 Key Metrics")
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        with col1:
+            st.metric("Current Price", f"₹{analysis['current_price']:.2f}")
+        with col2:
+            st.metric("Market Cap", format_number(analysis['market_cap']))
+        with col3:
+            st.metric("P/E Ratio", f"{analysis['pe_ratio']:.2f}")
+        with col4:
+            st.metric("P/B Ratio", f"{analysis['pb_ratio']:.2f}")
+        with col5:
+            st.metric("Div Yield", f"{analysis['dividend_yield']:.2f}%")
+        
+        st.markdown("---")
+        
+        # Performance Metrics
+        st.markdown("### 📈 Performance")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("1 Month", f"{analysis['returns_1m']:.2f}%")
+        with col2:
+            st.metric("3 Months", f"{analysis['returns_3m']:.2f}%")
+        with col3:
+            st.metric("6 Months", f"{analysis['returns_6m']:.2f}%")
+        with col4:
+            st.metric("1 Year", f"{analysis['returns_1y']:.2f}%")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("52W High", f"₹{analysis['week_52_high']:.2f}")
+        with col2:
+            st.metric("52W Low", f"₹{analysis['week_52_low']:.2f}")
+        with col3:
+            st.metric("Volatility", f"{analysis['volatility']:.2f}%")
+        
+        st.markdown("---")
+        
+        # Technical Indicators
+        st.markdown("### 🔧 Technical Indicators")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            rsi = analysis['rsi']
+            rsi_color = "🟢" if 30 < rsi < 70 else "🔴"
+            st.metric("RSI", f"{rsi:.2f} {rsi_color}")
+        
+        with col2:
+            macd = analysis['macd']
+            macd_color = "🟢" if macd > analysis['macd_signal'] else "🔴"
+            st.metric("MACD", f"{macd:.2f} {macd_color}")
+        
+        with col3:
+            adx = analysis['adx']
+            adx_color = "🟢" if adx > 25 else "🟡"
+            st.metric("ADX", f"{adx:.2f} {adx_color}")
+        
+        with col4:
+            vol_ratio = analysis['volume_ratio']
+            vol_color = "🟢" if vol_ratio > 1 else "🔴"
+            st.metric("Volume Ratio", f"{vol_ratio:.2f} {vol_color}")
+        
+        st.markdown("---")
+        
+        # Charts
+        st.markdown("### 📉 Charts")
+        
+        df = analysis['df']
+        
+        # Price chart with indicators
+        fig = make_subplots(
+            rows=3, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.03,
+            row_heights=[0.5, 0.25, 0.25],
+            subplot_titles=('Price & Bollinger Bands', 'RSI', 'MACD')
+        )
+        
+        # Candlestick
+        fig.add_trace(
+            go.Candlestick(
+                x=df.index,
+                open=df['Open'],
+                high=df['High'],
+                low=df['Low'],
+                close=df['Close'],
+                name='Price'
+            ),
+            row=1, col=1
+        )
+        
+        # Bollinger Bands
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_upper'], 
+                                line=dict(dash='dash', color='gray', width=1),
+                                name='BB Upper'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_lower'], 
+                                line=dict(dash='dash', color='gray', width=1),
+                                name='BB Lower'), row=1, col=1)
+        
+        # RSI
+        fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], 
+                                line=dict(color='purple'),
+                                name='RSI'), row=2, col=1)
+        fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+        
+        # MACD
+        fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], 
+                                line=dict(color='blue'),
+                                name='MACD'), row=3, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], 
+                                line=dict(color='red'),
+                                name='Signal'), row=3, col=1)
+        
+        fig.update_layout(height=800, showlegend=False, xaxis_rangeslider_visible=False)
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        st.markdown("---")
+        
+        # Volume chart
+        st.markdown("### 📊 Volume Analysis")
+        
+        fig_vol = go.Figure()
+        
+        colors = ['red' if df['Close'].iloc[i] < df['Open'].iloc[i] else 'green' 
+                 for i in range(len(df))]
+        
+        fig_vol.add_trace(go.Bar(
+            x=df.index,
+            y=df['Volume'],
+            marker_color=colors,
+            name='Volume'
+        ))
+        
+        fig_vol.add_trace(go.Scatter(
+            x=df.index,
+            y=df['Vol_MA'],
+            line=dict(color='orange', width=2),
+            name='Avg Volume'
+        ))
+        
+        fig_vol.update_layout(height=300)
+        st.plotly_chart(fig_vol, use_container_width=True)
+
+# Footer
+st.markdown("---")
+st.markdown("""
+    <div style='text-align: center; color: #666; padding: 2rem;'>
+        <h3 style='color: #667eea;'>👁️ ARTHA DRISHTI</h3>
+        <p><strong>ML Based Advanced Stock Screener v3.0</strong></p>
+        <p>⚠️ For educational purposes only. Not financial advice.</p>
+        <p>Data: Yahoo Finance | News: NewsAPI | Built with Streamlit & ML</p>
+    </div>
+""", unsafe_allow_html=True)

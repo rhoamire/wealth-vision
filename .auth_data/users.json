@@ -1,0 +1,53 @@
+{
+  "users": {
+    "taran suratwala": {
+      "password_hash": "4d1710fb44dc32f9f7a06010aeb6635f12dadb85445ef61b1f9e749d578472b5",
+      "salt": "494042022a464cccb6b85fc99e7ddd32",
+      "full_name": "Taran Suratwala",
+      "email": "",
+      "created_at": "2026-02-24T12:52:12.160452",
+      "last_login": "2026-04-27T17:48:26.005584",
+      "settings": {
+        "default_exchange": "NSE",
+        "theme": "dark",
+        "notifications": true
+      },
+      "watchlist": [],
+      "portfolio": [],
+      "alerts": [],
+      "trade_journal": [
+        {
+          "id": "20260427153154719968",
+          "symbol": "3IINFOLTD",
+          "side": "Long",
+          "entry_date": "2026-04-27",
+          "exit_date": "2026-04-27",
+          "quantity": 100,
+          "entry_price": 100.0,
+          "exit_price": 106.5,
+          "strategy": "",
+          "outcome": "Open",
+          "tags": [],
+          "notes": "",
+          "attachment": "",
+          "pnl": 0.0,
+          "pnl_pct": 0.0,
+          "created_at": "2026-04-27T15:31:54.719968"
+        }
+      ],
+      "analysis_history": [
+        {
+          "timestamp": "2026-04-27 15:27:57",
+          "symbol": "3IINFOLTD",
+          "company": "3i Infotech Limited",
+          "price": 17.790000915527344,
+          "recommendation": "HOLD",
+          "rec_score": 2.0,
+          "prediction_confidence": 0.0,
+          "expected_return": 0.0,
+          "news_sentiment": "Neutral"
+        }
+      ]
+    }
+  }
+}
